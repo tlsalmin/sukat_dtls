@@ -156,95 +156,6 @@ int sukat_dtls_listen_step(sukat_dtls_client_t *client,
   return -1;
 }
 
-/** @brief Accepts a new UDP connection.
- *
- * Yes UDP connections aren't really accepted, but by creating a new socket,
- * which is connected to the new peer, we can separate the UDP clients into
- * "accepted" fds */
-bool sukat_dtls_accept(sukat_dtls_server_t *ctx, sukat_dtls_client_t *client,
-                       uint32_t *events)
-{
-  int ret;
-  client->slen = sizeof(client->peer);
-  struct sockaddr_storage bound_store = { };
-  socklen_t bound_store_len = sizeof(bound_store);
-
-  if (getsockname(ctx->udp_fd, (struct sockaddr *)&bound_store,
-                  &bound_store_len))
-    {
-      ERR("Failed to get sockname from %d: %s", ctx->udp_fd, strerror(errno));
-    }
-
-  // Keeping BIO non-blocking should avoid need for timeout.
-  ret = sukat_util_peek_peer(ctx->udp_fd, (struct sockaddr *)&client->peer,
-                             sizeof(client->peer));
-  if (ret > 0)
-    {
-      char errbuf[BUFSIZ];
-      /* The trick with UDP servers is to have the main fd be
-       * SO_REUSEADDR | SO_REUSEPORT and any client-connected fds to
-       * be only SO_REUSEADDR */
-      sukat_util_fd_opts_t opts =
-        (sukat_sockopt_reuseaddr | sukat_sockopt_bind);
-      int new_fd;
-
-      client->slen = ret;
-      new_fd = sukat_util_fd_duplicate(ctx->udp_fd, SOCK_DGRAM, &client->peer,
-                                       client->slen, opts);
-
-      if (new_fd != -1)
-        {
-          client->ssl = SSL_new(ctx->ssl_ctx);
-
-          if (client->ssl)
-            {
-              BIO *bio;
-              SSL_set_options(client->ssl, SSL_OP_COOKIE_EXCHANGE);
-
-              bio = BIO_new_dgram(ctx->udp_fd, BIO_NOCLOSE);
-              if (bio)
-                {
-                  char ipstr[IPSTRLEN];
-
-                  SSL_set_bio(client->ssl, bio, bio);
-
-                  ret = sukat_dtls_listen_step(client, events);
-                  BIO_set_fd(bio, new_fd, BIO_NOCLOSE);
-                  BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0, &client->peer);
-                  if (ret >= 0)
-                    {
-                      client->dtls_finished = (ret == 1);
-                      INF("Accepted new fd %d from %s", new_fd,
-                          sukat_util_storage_print(
-                            (struct sockaddr *)&client->peer, ipstr,
-                            sizeof(ipstr)));
-                      return true;
-                    }
-                }
-              else
-                {
-                  ERR("Failed to create new bio: %s",
-                      ERR_error_string(ERR_get_error(), errbuf));
-                }
-              // Destroys BIO on the way.
-              SSL_free(client->ssl);
-              client->ssl = NULL;
-            }
-          else
-            {
-              ERR("Failed to create new SSL from %p: %s", ctx->ssl_ctx,
-                  ERR_error_string(ERR_get_error(), errbuf));
-            }
-          sukat_util_fd_safe_close(&new_fd);
-        }
-    }
-  else
-    {
-      ERR("Failed to peek for new peer");
-    }
-  return false;
-}
-
 void sukat_dtls_client_destroy(sukat_dtls_server_t *ctx,
                                sukat_dtls_client_t *client)
 {
@@ -270,43 +181,132 @@ void sukat_dtls_client_destroy(sukat_dtls_server_t *ctx,
     }
 }
 
+static void sukat_dtls_new_client_register(sukat_dtls_server_t *ctx,
+                                           sukat_dtls_client_t *client)
+{
+  char ipstr[IPSTRLEN];
+
+  INF("Accepted new client from %s",
+      sukat_util_storage_print((struct sockaddr *)&client->peer, ipstr,
+                               sizeof(ipstr)));
+
+  if (ctx->cbs.event_cb &&
+      (ctx->subscribed & sukat_dtls_client_event_connected))
+    {
+      ctx->cbs.event_cb(ctx->context, client,
+                        sukat_dtls_client_event_connected);
+    }
+}
+
+/** @brief Accepts a new UDP connection.
+ *
+ * Yes UDP connections aren't really accepted, but by creating a new socket,
+ * which is connected to the new peer, we can separate the UDP clients into
+ * "accepted" fds */
 static int sukat_dtls_new_client(sukat_dtls_server_t *ctx)
 {
-  sukat_dtls_client_t *client = calloc(1, sizeof(*client));
-  union epoll_data data = {};
-  uint32_t events;
+  struct sockaddr_storage peer;
+  int peek_ret;
+  struct sockaddr_storage bound_store = { };
+  socklen_t bound_store_len = sizeof(bound_store);
 
-  if (!client)
+  if (getsockname(ctx->udp_fd, (struct sockaddr *)&bound_store,
+                  &bound_store_len))
     {
-      ERR("Failed to allocate client: %s", strerror(errno));
+      ERR("Failed to get sockname from %d: %s", ctx->udp_fd, strerror(errno));
+      return -1;
     }
-  else if (!sukat_dtls_accept(ctx, client, &events))
+  // Accept new clients in a loop, since that's how we roll.
+  while ((peek_ret = sukat_util_peek_peer(ctx->udp_fd, (struct sockaddr *)&peer,
+                                          sizeof(peer))) > 0)
     {
-      ERR("Failed to accept new SSL connection");
-    }
-  else if ((data.ptr = client) &&
-           sukat_epoll_reg(ctx->efd,
-                           BIO_get_fd(SSL_get_rbio(client->ssl), NULL), &data,
-                           events))
-    {
-      DBG("Accepted new client %p", client);
-      // Success.
-      if (ctx->cbs.event_cb &&
-          (ctx->subscribed & sukat_dtls_client_event_connected))
+      /* The trick with UDP servers is to have the main fd be SO_REUSEADDR |
+       * SO_REUSEPORT and any client-connected fds to be only SO_REUSEADDR */
+      sukat_util_fd_opts_t opts =
+        (sukat_sockopt_reuseaddr | sukat_sockopt_bind);
+      int new_fd;
+
+      new_fd =
+        sukat_util_fd_duplicate(ctx->udp_fd, SOCK_DGRAM, &peer, peek_ret, opts);
+      if (new_fd != -1)
         {
-          ctx->cbs.event_cb(ctx->context, client,
-                            sukat_dtls_client_event_connected);
+          sukat_dtls_client_t *client = calloc(1, sizeof(*client));
+
+          // This could be broken down to smaller funcs, but later.
+          if (client)
+            {
+              char errbuf[512];
+
+              client->ssl = SSL_new(ctx->ssl_ctx);
+              memcpy(&client->peer, &peer, peek_ret);
+              client->slen = peek_ret;
+
+              if (client->ssl)
+                {
+                  BIO *bio;
+                  SSL_set_options(client->ssl, SSL_OP_COOKIE_EXCHANGE);
+
+                  bio = BIO_new_dgram(ctx->udp_fd, BIO_NOCLOSE);
+                  if (bio)
+                    {
+                      uint32_t events = EPOLLIN;
+                      int ret;
+
+                      SSL_set_bio(client->ssl, bio, bio);
+
+                      ret = sukat_dtls_listen_step(client, &events);
+                      BIO_set_fd(bio, new_fd, BIO_CLOSE);
+                      BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0,
+                               &client->peer);
+                      if (ret >= 0)
+                        {
+                          union epoll_data edata = {.ptr = client};
+
+                          client->dtls_finished = (ret == 1);
+                          if (sukat_epoll_reg(ctx->efd, new_fd, &edata, events))
+                            {
+                              sukat_dtls_new_client_register(ctx, client);
+                              // Try to get another one.
+                              continue;
+                            }
+                          else
+                            {
+                              ERR("Failed to register fd %ld to efd %d: %s",
+                                  BIO_get_fd(SSL_get_rbio(client->ssl), NULL),
+                                  ctx->efd, strerror(errno));
+                            }
+                        }
+                      // fd gets closed with SSL.
+                      new_fd = -1;
+                      // Bio gets destroyed with SSL.
+                    }
+                  else
+                    {
+                      ERR("Failed to create new bio: %s",
+                          ERR_error_string(ERR_get_error(), errbuf));
+                    }
+                  SSL_free(client->ssl);
+                }
+              else
+                {
+                  ERR("Failed to create new SSL from %p: %s", ctx->ssl_ctx,
+                      ERR_error_string(ERR_get_error(), errbuf));
+                }
+              free(client);
+            }
+          else
+            {
+              ERR("Failed to allocate new client: %s", strerror(errno));
+            }
+          sukat_util_fd_safe_close(&new_fd);
         }
-      return 0;
+      else
+        {
+          ERR("Failed to duplicate fd %d: %s", ctx->udp_fd, strerror(errno));
+        }
     }
-  else
-    {
-      ERR("Failed to register fd %ld to efd %d: %s",
-          BIO_get_fd(SSL_get_rbio(client->ssl), NULL), ctx->efd,
-          strerror(errno));
-    }
-  sukat_dtls_client_destroy(ctx, client);
-  return -1;
+
+  return 0;
 }
 
 static int sukat_dtls_client_accept(sukat_dtls_server_t *ctx,

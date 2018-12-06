@@ -11,6 +11,9 @@ to the main "listening" fd. A connected socket is "more precise",
 similar to a routing scenario, which allows separating client
 streams.
 
+Note that I've developed this on OpenSSL 1.0.2q  20 Nov 2018. I can give no
+guarantees of it working on earlier Openssl-versions.
+
 ## Building
 
 Default build:

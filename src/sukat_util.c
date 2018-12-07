@@ -156,7 +156,7 @@ bool sukat_util_sockopts(int fd, sukat_util_fd_opts_t opts)
     }
   else
     {
-      ERR("Failed to do opts %d on fd %d: %s", opts, fd, strerror(errno));
+      ERR("Failed to do opts %x on fd %d: %s", opts, fd, strerror(errno));
     }
   return false;
 }
@@ -167,7 +167,6 @@ int sukat_util_fd_create(const char *addr, const char *port, int type,
 {
   int fd = -1;
   struct sockaddr_storage bind_to = {};
-  struct sockaddr_in *bind_to_4 = (struct sockaddr_in *)&bind_to;
   struct sockaddr_in6 *bind_to_6 = (struct sockaddr_in6 *)&bind_to;
   socklen_t slen = sizeof(bind_to);
 
@@ -180,14 +179,8 @@ int sukat_util_fd_create(const char *addr, const char *port, int type,
     {
       uint16_t port_int = atoi(port);
 
-      if (bind_to.ss_family == AF_INET6)
-        {
-          bind_to_6->sin6_port = htons(port_int);
-        }
-      else
-        {
-          bind_to_4->sin_port = htons(port_int);
-        }
+      bind_to.ss_family = AF_INET6;
+      bind_to_6->sin6_port = htons(port_int);
     }
   else if (!sukat_util_solve(addr, port, type, &bind_to, &slen, opts))
     {

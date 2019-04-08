@@ -18,32 +18,22 @@ static int sukat_cert_cookie_gen(SSL *ssl, unsigned char *cookie,
                                  unsigned int *cookie_len)
 {
   unsigned char *ex_data_cookie = SSL_get_ex_data(ssl, sukat_cert_cookie_index);
-  char errbuf[BUFSIZ];
 
   if (ex_data_cookie)
     {
-      if (RAND_bytes(ex_data_cookie, sukat_cert_cookie_len) == 1)
+      if (*cookie_len >= sukat_cert_cookie_len)
         {
-          if (*cookie_len >= sukat_cert_cookie_len)
-            {
-              DBG("Copying %ld byte random cookie to %p", sukat_cert_cookie_len,
-                  cookie);
-              memcpy(cookie, ex_data_cookie, sukat_cert_cookie_len);
-              *cookie_len = sukat_cert_cookie_len;
+          DBG("Copying %ld byte random cookie to %p", sukat_cert_cookie_len,
+              cookie);
+          memcpy(cookie, ex_data_cookie, sukat_cert_cookie_len);
+          *cookie_len = sukat_cert_cookie_len;
 
-              return 1;
-            }
-          else
-            {
-              ERR("Couldn't copy %ld bytes of cookie data to buffer of size %u",
-                  sukat_cert_cookie_len, *cookie_len);
-            }
+          return 1;
         }
       else
         {
-          ERR("Failed to generate %ld random bytes for client %p: %s",
-              sukat_cert_cookie_len, ssl,
-              ERR_error_string(ERR_get_error(), errbuf));
+          ERR("Couldn't copy %ld bytes of cookie data to buffer of size %u",
+              sukat_cert_cookie_len, *cookie_len);
         }
     }
   else
@@ -339,9 +329,17 @@ static int sukat_cert_cookie_new(__attribute__((unused)) void *parent,
 
           if (CRYPTO_set_ex_data(ad, idx, cookie) == 1)
             {
-              DBG("Allocated new cookie %p of len %ld to ad %p", cookie, argl,
-                  ad);
-              return 1;
+              if (RAND_bytes(cookie, argl) == 1)
+                {
+                  DBG("Allocated new cookie %p of len %ld to ad %p", cookie,
+                      argl, ad);
+                  return 1;
+                }
+              else
+                {
+                  ERR("Failed to generate %ld random bytes: %s",
+                      argl, ERR_error_string(ERR_get_error(), errbuf));
+                }
             }
           else
             {

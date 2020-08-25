@@ -1,5 +1,14 @@
 # A DTLS server/client library for Linux: sukat_dtls
 
+## Warning: Broken on newest openssl
+
+Seems there's some refactoring going on with openssl. See e.g.
+https://github.com/openssl/openssl/issues/6934
+
+DTLSv1_listen() Now doesn't continue the handshake with this
+implementation. Probably not worth continuing development as openssl
+DTLS doesn't seem all that serious of an effort.
+
 ## Introduction
 
 This is a quite minimalistic DTLS library utilizing openssl.

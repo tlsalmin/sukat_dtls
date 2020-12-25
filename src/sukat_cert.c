@@ -21,20 +21,12 @@ static int sukat_cert_cookie_gen(SSL *ssl, unsigned char *cookie,
 
   if (ex_data_cookie)
     {
-      if (*cookie_len >= sukat_cert_cookie_len)
-        {
-          DBG("Copying %ld byte random cookie to %p", sukat_cert_cookie_len,
-              cookie);
-          memcpy(cookie, ex_data_cookie, sukat_cert_cookie_len);
-          *cookie_len = sukat_cert_cookie_len;
+      DBG("Copying %ld byte random cookie to %p", sukat_cert_cookie_len,
+          cookie);
+      memcpy(cookie, ex_data_cookie, sukat_cert_cookie_len);
+      *cookie_len = sukat_cert_cookie_len;
 
-          return 1;
-        }
-      else
-        {
-          ERR("Couldn't copy %ld bytes of cookie data to buffer of size %u",
-              sukat_cert_cookie_len, *cookie_len);
-        }
+      return 1;
     }
   else
     {
@@ -44,11 +36,12 @@ static int sukat_cert_cookie_gen(SSL *ssl, unsigned char *cookie,
   return 0;
 }
 
-static int sukat_cert_cookie_verify(SSL *ssl, unsigned char *cookie,
+static int sukat_cert_cookie_verify(SSL *ssl, const unsigned char *cookie,
                                     unsigned int cookie_len)
 {
   unsigned char *ex_data_cookie = SSL_get_ex_data(ssl, sukat_cert_cookie_index);
 
+  DBG("Verifying cookie %*.s", (int)cookie_len, cookie);
   if (ex_data_cookie)
     {
       if (cookie_len == sukat_cert_cookie_len)
@@ -289,8 +282,7 @@ SSL_CTX *sukat_cert_context_init(struct sukat_cert_init_options *opts)
           // Load some CAs.
           if (!opts->cert || load_cas(opts->cert, ssl_ctx))
             {
-              if (opts->method == DTLS_server_method() ||
-                  opts->method == DTLSv1_2_server_method())
+              if (opts->method == DTLS_server_method())
                 {
                   SSL_CTX_set_cookie_generate_cb(ssl_ctx,
                                                  sukat_cert_cookie_gen);
@@ -311,7 +303,7 @@ SSL_CTX *sukat_cert_context_init(struct sukat_cert_init_options *opts)
   return NULL;
 }
 
-static int sukat_cert_cookie_new(__attribute__((unused)) void *parent,
+static void sukat_cert_cookie_new(__attribute__((unused)) void *parent,
                                  __attribute__((unused)) void *ptr,
                                  CRYPTO_EX_DATA *ad, int idx, long argl,
                                  __attribute__((unused)) void *argp)
@@ -333,7 +325,7 @@ static int sukat_cert_cookie_new(__attribute__((unused)) void *parent,
                 {
                   DBG("Allocated new cookie %p of len %ld to ad %p", cookie,
                       argl, ad);
-                  return 1;
+                  return;
                 }
               else
                 {
@@ -359,11 +351,10 @@ static int sukat_cert_cookie_new(__attribute__((unused)) void *parent,
       DBG("Cert cookie called with ids %d, when expected %d", idx,
           sukat_cert_cookie_index);
     }
-  return 0;
 }
 
 // I confess, I'm not sure what to do with from_d.
-static int sukat_cert_cookie_dup(CRYPTO_EX_DATA *to, CRYPTO_EX_DATA *from,
+static int sukat_cert_cookie_dup(CRYPTO_EX_DATA *to, const CRYPTO_EX_DATA *from,
                                  __attribute__((unused)) void *from_d, int idx,
                                  long argl,
                                  __attribute__((unused)) void *argp)
@@ -444,13 +435,26 @@ static void sukat_cert_cookie_free(__attribute__((unused)) void *parent,
 
 int sukat_cert_cookie_index_init(long cookie_len)
 {
-  sukat_cert_cookie_index = SSL_get_ex_new_index(cookie_len, NULL,
-                                                 sukat_cert_cookie_new,
-                                                 sukat_cert_cookie_dup,
-                                                 sukat_cert_cookie_free);
-  if (sukat_cert_cookie_index >= 0)
+  if (cookie_len == 0)
     {
-      sukat_cert_cookie_len = cookie_len;
+      cookie_len = DTLS1_COOKIE_LENGTH - 1;
+    }
+  if (cookie_len > DTLS1_COOKIE_LENGTH)
+    {
+      ERR("Cookie length %ld too long as max is %d", cookie_len,
+          DTLS1_COOKIE_LENGTH);
+    }
+  else
+    {
+      sukat_cert_cookie_index = CRYPTO_get_ex_new_index(CRYPTO_EX_INDEX_SSL,
+                                                        cookie_len, NULL,
+                                                        sukat_cert_cookie_new,
+                                                        sukat_cert_cookie_dup,
+                                                        sukat_cert_cookie_free);
+      if (sukat_cert_cookie_index >= 0)
+        {
+          sukat_cert_cookie_len = cookie_len;
+        }
     }
   return sukat_cert_cookie_index;
 }

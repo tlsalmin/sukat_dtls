@@ -120,40 +120,48 @@ int sukat_dtls_listen_step(sukat_dtls_client_t *client,
   int sslerr = 0;
   /* Dummy, since sockaddr from peek is always set, unlike
    * with a call to DTLSV1_listen */
-  struct sockaddr_storage dtls_peer = {};
-  int ret = DTLSv1_listen(client->ssl, &dtls_peer);
+  BIO_ADDR *dtls_peer = BIO_ADDR_new();
+  int ret = DTLSv1_listen(client->ssl, dtls_peer);
+  int func_ret = -1;
 
+  DBG("Accepting returned %d", ret);
   if (ret <= 0)
     {
       sslerr = SSL_get_error(client->ssl, ret);
       ERR_clear_error();
     }
-  if (ret == 1 ||
-      (sslerr = SSL_ERROR_WANT_READ || sslerr == SSL_ERROR_WANT_WRITE))
+  if (ret == 1 || (ret == 0 &&
+      (sslerr = SSL_ERROR_WANT_READ || sslerr == SSL_ERROR_WANT_WRITE)))
     {
-      client->dtls_finished = (ret == 1);
       *events = EPOLLIN;
 
       if (ret == 1)
         {
           INF("Client %p from %s DTLS handshake finished", client,
-              sukat_util_storage_print((struct sockaddr *)&dtls_peer, errbuf,
+              sukat_util_storage_print((struct sockaddr *)dtls_peer, errbuf,
                                        sizeof(errbuf)));
+          client->dtls_finished = true;
         }
       else
         {
-          ret = 0;
+          INF("Accepting client  %p from %s DTLS handshake needs %d", client,
+              sukat_util_storage_print((struct sockaddr *)dtls_peer, errbuf,
+                                       sizeof(errbuf)), sslerr);
         }
       if (sslerr == SSL_ERROR_WANT_WRITE)
         {
           *events |= EPOLLOUT;
         }
 
-      return ret;
+      func_ret = 0;
     }
-  ERR("Failed to DTLS accept a new client: %s",
-      ERR_error_string(sslerr, errbuf));
-  return -1;
+  else
+    {
+      ERR("Failed to DTLS accept a new client: %s",
+          ERR_error_string(sslerr, errbuf));
+    }
+  BIO_ADDR_free(dtls_peer);
+  return func_ret;
 }
 
 void sukat_dtls_client_destroy(sukat_dtls_server_t *ctx,
@@ -328,20 +336,6 @@ static int sukat_dtls_client_accept(sukat_dtls_server_t *ctx,
 
       if (ret >= 0)
         {
-          if (ret == 1)
-            {
-              char ipstr[IPSTRLEN];
-
-              DBG("Client %p from %s dtls handshake_finished", client,
-                  sukat_util_storage_print((struct sockaddr *)&client->peer, ipstr,
-                                           sizeof(ipstr)));
-              client->dtls_finished = true;
-            }
-          else
-            {
-              DBG("Client %p still needs more %s", client,
-                  (events & EPOLLOUT) ? "write" : "read");
-            }
           ret = 0;
         }
     }
@@ -355,7 +349,7 @@ static int sukat_dtls_client_accept(sukat_dtls_server_t *ctx,
           sslerr = SSL_get_error(client->ssl, ret);
           ERR_clear_error();
         }
-      DBG("SSl accept for client %p returned %d, sslerr %d", client, ret,
+      DBG("SSL accept for client %p returned %d, sslerr %d", client, ret,
           sslerr);
       if (ret == 1 ||
           (sslerr == SSL_ERROR_WANT_READ || sslerr == SSL_ERROR_WANT_WRITE))
@@ -465,6 +459,13 @@ static int sukat_dtls_epoll_cb(void *context, uint32_t events,
       if (sukat_dtls_client_readable(ctx, client))
         {
           DBG("Client %p ordered removal", client);
+              if (ctx->cbs.event_cb &&
+                  (ctx->subscribed & sukat_dtls_client_event_disconnected))
+                {
+                  // TODO: If client disconnected here, we're in big trouble.
+                  ctx->cbs.event_cb(ctx->context, client,
+                                    sukat_dtls_client_event_disconnected);
+                }
           sukat_dtls_client_destroy(ctx, client);
         }
     }

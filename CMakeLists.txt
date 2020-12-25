@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 2.6)
+cmake_minimum_required (VERSION 3.7)
 project (sukat_dtls)
 
 AUX_SOURCE_DIRECTORY(${CMAKE_SOURCE_DIR}/src SUKAT_DTLS_LIB_SRC)

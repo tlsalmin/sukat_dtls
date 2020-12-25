@@ -1,13 +1,6 @@
 # A DTLS server/client library for Linux: sukat_dtls
 
-## Warning: Broken on newest openssl
-
-Seems there's some refactoring going on with openssl. See e.g.
-https://github.com/openssl/openssl/issues/6934
-
-DTLSv1_listen() Now doesn't continue the handshake with this
-implementation. Probably not worth continuing development as openssl
-DTLS doesn't seem all that serious of an effort.
+## Update: Fixed for Openssl 1.1.1!
 
 ## Introduction
 
@@ -85,7 +78,7 @@ Data visible in tshark:
 Example with multiple clients. Server side:
 
 ```
-user@server ~/src/dtls_sukat/build $ ./nc_dtls -l 10.0.0.201 9999 -c ../tests/certs/server_cert.pe-k ../tests/certs/server_key.pem
+user@server ~/src/dtls_sukat/build $ ./nc_dtls -l 10.0.0.201 9999 -c ../tests/certs/server_cert.pem -k ../tests/certs/server_key.pem
 Hello from client 2
 Hello from client 3
 Hello from client 1

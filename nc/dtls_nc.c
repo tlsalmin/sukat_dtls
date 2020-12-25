@@ -93,9 +93,13 @@ SSL_CTX *dtls_nc_init_ssl_ctx(struct nc_dtls_ctx *ctx)
           cert.pkey.path = ctx->pkey;
         }
     }
+  else if (ctx->server)
+    {
+      ERR("No certificate set for server");
+      return NULL;
+    }
 
-
-  opts.method = (ctx->server) ? DTLSv1_2_server_method() : DTLSv1_2_client_method();
+  opts.method = (ctx->server) ? DTLS_server_method() : DTLS_client_method();
 
   opts.context = ctx;
 
@@ -121,8 +125,14 @@ static bool nc_dtls_stdin_reg(struct nc_dtls_ctx *ctx, uint32_t events)
 static void nc_peer_disconnect(struct nc_dtls_ctx *ctx,
                                struct nc_client_entry *client)
 {
+  char buf[BUFSIZ];
+
   sukat_list_remove(&ctx->clients, &client->link);
-  sukat_dtls_client_destroy(ctx->server_ctx, client->client);
+  if (client->client)
+    {
+      INF("Removing peer %s", sukat_dtls_client_to_string(client->client, buf, sizeof(buf)));
+      sukat_dtls_client_destroy(ctx->server_ctx, client->client);
+    }
   free(client);
 }
 
@@ -153,6 +163,7 @@ static void nc_dtls_event_cb(void *context, sukat_dtls_client_t *client,
 {
   struct nc_dtls_ctx *ctx = context;
   char ipstr[IPSTRLEN];
+  sukat_list_link_t *iter;
 
   DBG("Event 0x%x on client %p", event, client);
 
@@ -163,44 +174,40 @@ static void nc_dtls_event_cb(void *context, sukat_dtls_client_t *client,
         /* fall through */
       case sukat_dtls_client_event_connected:
         /* fall through */
-      case sukat_dtls_client_event_disconnected:
         INF(
           "Client %s from: %s",
           (event == sukat_dtls_client_event_connected)
             ? "connected"
-            : ((event == sukat_dtls_client_event_established) ? "established"
-                                                              : "disconnected"),
+            : "established",
           sukat_dtls_client_to_string(client, ipstr, sizeof(ipstr)));
         break;
       case sukat_dtls_client_event_data_readable:
-        if (nc_client_read(client) == -1)
+        if (nc_client_read(client) != -1)
           {
-            sukat_list_link_t *iter;
-
-            // Need to find client to disconnect.
-            for (iter = sukat_list_begin(&ctx->clients); iter;
-                 iter = sukat_list_next(iter))
-              {
-                struct nc_client_entry *entry = sukat_list_data(iter, struct nc_client_entry, link);
-
-                if (entry->client)
-                  {
-                    nc_peer_disconnect(ctx, entry);
-                    return;
-                  }
-              }
-            assert(iter);
+            break;
           }
+        /* fall through */
+      case sukat_dtls_client_event_disconnected:
+          // Need to find client to disconnect.
+          for (iter = sukat_list_begin(&ctx->clients); iter;
+               iter = sukat_list_next(iter))
+            {
+              struct nc_client_entry *entry = sukat_list_data(iter, struct nc_client_entry, link);
+
+              if (event == sukat_dtls_client_event_disconnected)
+                {
+                  entry->client = NULL;
+                }
+              nc_peer_disconnect(ctx, entry);
+              break;
+            }
+          assert(iter);
         break;
       default:
         abort();
         break;
     }
-  if (event == sukat_dtls_client_event_disconnected)
-    {
-      sukat_dtls_client_destroy(ctx->server_ctx, client);
-    }
-  else if (event == sukat_dtls_client_event_connected)
+  if (event == sukat_dtls_client_event_connected)
     {
       struct nc_client_entry *client_entry;
 
@@ -221,7 +228,6 @@ static void nc_dtls_event_cb(void *context, sukat_dtls_client_t *client,
 static bool nc_dtls_init_server_or_client(struct nc_dtls_ctx *ctx,
                                           const char *dst, const char *port)
 {
-  int ret;
   uint32_t events = EPOLLIN;
   struct sukat_dtls_server_options opts = {
     .ssl_ctx = ctx->ssl_ctx,
@@ -235,8 +241,8 @@ static bool nc_dtls_init_server_or_client(struct nc_dtls_ctx *ctx,
                          sukat_dtls_client_event_disconnected};
 
   if ((!ctx->server &&
-       (ret = sukat_dtls_client_connect(ctx->ssl_ctx, dst, port,
-                                        &ctx->client_ctx, &events)) >= 0) ||
+       sukat_dtls_client_connect(ctx->ssl_ctx, dst, port, &ctx->client_ctx,
+                                 &events) >= 0) ||
       (ctx->server && (ctx->server_ctx = sukat_dtls_server_init(&opts))))
 
     {
@@ -419,14 +425,15 @@ static int nc_write_to_peers(struct nc_dtls_ctx *ctx, const char *buf,
         }
       else
         {
-          sukat_list_link_t *iter;
+          sukat_list_link_t *iter, *next;
           ret = 0;
 
-          for (iter = sukat_list_begin(&ctx->clients); iter;
-               iter = sukat_list_next(iter))
+          for (iter = sukat_list_begin(&ctx->clients); iter; iter = next)
             {
               struct nc_client_entry *entry =
                 sukat_list_data(iter, struct nc_client_entry, link);
+
+              next = sukat_list_next(iter);
 
               if (nc_write_to_peer(ctx, entry->client, buf, bytes))
                 {
@@ -640,7 +647,7 @@ int main(int argc, char **argv)
   ctx.efd = epoll_create1(EPOLL_CLOEXEC);
   if (ctx.efd != -1)
     {
-      if (!ctx.server || (cookie_index = sukat_cert_cookie_index_init(32)) >= 0)
+      if (!ctx.server || (cookie_index = sukat_cert_cookie_index_init(0)) >= 0)
         {
           ctx.ssl_ctx = dtls_nc_init_ssl_ctx(&ctx);
 

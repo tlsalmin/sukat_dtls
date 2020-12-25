@@ -3,6 +3,7 @@
 extern "C"{
 #include "sukat_dtls.h"
 #include <sys/epoll.h>
+#include <sys/timerfd.h>
 #include <netdb.h>
 #include <arpa/inet.h>
 #include "sukat_util.h"
@@ -32,7 +33,7 @@ protected:
   static void SetUpTestCase()
     {
       sukat_ssl_init();
-      cookie_index = sukat_cert_cookie_index_init(32);
+      cookie_index = sukat_cert_cookie_index_init(0);
       ASSERT_NE(-1, cookie_index);
     }
 
@@ -40,6 +41,48 @@ protected:
     {
       sukat_cert_cookie_index_close(cookie_index);
     }
+
+  bool prep_timeout()
+  {
+      tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+
+      if (tfd != -1)
+      {
+          struct itimerspec tspec =
+          {
+              .it_interval =
+              {
+                  .tv_sec = 10,
+                  .tv_nsec = 0
+              },
+              .it_value = {
+                  .tv_sec = 10,
+                  .tv_nsec = 0,
+              }
+          };
+
+          if (!timerfd_settime(tfd, 0, &tspec, NULL))
+          {
+              union epoll_data edata = {};
+
+              if (sukat_epoll_reg(efd, tfd, &edata, EPOLLIN))
+              {
+                  return true;
+              }
+          }
+          else
+          {
+              abort();
+          }
+          close(tfd);
+      }
+      else
+      {
+          abort();
+      }
+      return false;
+  }
+
   virtual void SetUp()
     {
       bool bret;
@@ -66,7 +109,7 @@ protected:
       cert_opts.cert.data_as_path_to_file =
         cert_opts.pkey.data_as_path_to_file = true;
       cert_opts.cert.form = cert_opts.pkey.form = SSL_FILETYPE_PEM;
-      cert_init_opts.method = DTLSv1_2_server_method();
+      cert_init_opts.method = DTLS_server_method();
       cert_init_opts.context = this;
 
       ssl_ctx = sukat_cert_context_init(&cert_init_opts);
@@ -108,12 +151,16 @@ protected:
       bret = sukat_epoll_reg(efd, sukat_dtls_server_efd(server_ctx), &edata,
                              EPOLLIN);
       ASSERT_NE(false, bret);
+
+      bret = prep_timeout();
+      ASSERT_EQ(true, bret);
     }
   virtual void TearDown()
     {
       sukat_dtls_server_destroy(server_ctx);
       SSL_CTX_free(ssl_ctx);
       sukat_util_fd_safe_close(&efd);
+      sukat_util_fd_safe_close(&tfd);
     }
   static void dtls_event_cb(void *context, sukat_dtls_client_t *client,
                             sukat_dtls_client_event_t event)
@@ -155,6 +202,11 @@ protected:
           ret = sukat_dtls_server_process(test_ctx->server_ctx, 0);
           EXPECT_NE(-1, ret);
         }
+      else if (data->fd == test_ctx->tfd)
+      {
+          fprintf(stderr, "Timeout triggered\n");
+          return -1;
+      }
       else
         {
           sukat_dtls_client_t *client_ctx =
@@ -166,6 +218,7 @@ protected:
             {
               uint32_t events;
 
+              printf("Connecting client\n");
               ret = sukat_dtls_client_connect(NULL, NULL, 0,
                                               &client_ctx, &events);
               if (ret >= 0)
@@ -183,6 +236,7 @@ protected:
 
                   if (ret == 1)
                     {
+                        printf("Client handshake finished\n");
                       test_ctx->client_handshake_finished = true;
                     }
                 }
@@ -205,7 +259,7 @@ protected:
   static int cookie_index;
   sukat_dtls_client_event_t events_received;
   socklen_t server_addr_len;
-  int efd; //!< Event fd to use.
+  int efd{-1}, tfd{-1}; //!< Event fd to use.
   bool client_handshake_finished;
   std::string last_data, last_data_from_server;
   sukat_dtls_client_t *last_client_connected;
@@ -227,7 +281,7 @@ TEST_F(sukatDTLSTest, testClient)
     reply("Hello from server"), received_reply;
   char buf[BUFSIZ];
 
-  client_ssl_ctx = SSL_CTX_new(DTLSv1_2_client_method());
+  client_ssl_ctx = SSL_CTX_new(DTLS_client_method());
   ASSERT_NE(nullptr, client_ssl_ctx);
 
   ret = sukat_dtls_client_connect(client_ssl_ctx, server_addr.c_str(),
@@ -238,6 +292,7 @@ TEST_F(sukatDTLSTest, testClient)
 
 
   fd = sukat_dtls_client_fd(client_ctx);
+  printf("Adding fd %d to epoll %d with events %u\n", fd, efd, client_fd_events);
   edata.ptr = client_ctx;
   bret = sukat_epoll_reg(efd, fd, &edata, client_fd_events);
   EXPECT_TRUE(bret);
@@ -245,7 +300,7 @@ TEST_F(sukatDTLSTest, testClient)
   ret = 0;
   while (!client_handshake_finished && ret != -1)
     {
-      ret = sukat_epoll_wait(efd, test_sukat_epoll, this, 0);
+      ret = sukat_epoll_wait(efd, test_sukat_epoll, this, -1);
     }
   EXPECT_NE(-1, ret);
 
@@ -255,7 +310,7 @@ TEST_F(sukatDTLSTest, testClient)
     hello.length());
   EXPECT_LT(0, ret);
 
-  ret = sukat_epoll_wait(efd, test_sukat_epoll, this, 0);
+  ret = sukat_epoll_wait(efd, test_sukat_epoll, this, -1);
   EXPECT_NE(-1, ret);
 
   EXPECT_EQ(hello, last_data);
@@ -276,7 +331,7 @@ TEST_F(sukatDTLSTest, testClient)
   sukat_dtls_client_destroy(NULL, client_ctx);
   client_ctx = nullptr;
 
-  ret = sukat_epoll_wait(efd, test_sukat_epoll, this, 0);
+  ret = sukat_epoll_wait(efd, test_sukat_epoll, this, -1);
   EXPECT_NE(-1, ret);
 
   // Make a new connection and ensure the client recovers from the first.
@@ -296,7 +351,7 @@ TEST_F(sukatDTLSTest, testClient)
   ret = 0;
   while (!client_handshake_finished && ret != -1)
     {
-      ret = sukat_epoll_wait(efd, test_sukat_epoll, this, 0);
+      ret = sukat_epoll_wait(efd, test_sukat_epoll, this, -1);
     }
   EXPECT_NE(-1, ret);
 
@@ -308,7 +363,7 @@ TEST_F(sukatDTLSTest, testClient)
     hello.length());
   EXPECT_LT(0, ret);
 
-  ret = sukat_epoll_wait(efd, test_sukat_epoll, this, 0);
+  ret = sukat_epoll_wait(efd, test_sukat_epoll, this, -1);
   EXPECT_NE(-1, ret);
 
   EXPECT_EQ(hello, last_data);
@@ -318,6 +373,6 @@ TEST_F(sukatDTLSTest, testClient)
 
   SSL_CTX_free(client_ssl_ctx);
 
-  ret = sukat_epoll_wait(efd, test_sukat_epoll, this, 0);
+  ret = sukat_epoll_wait(efd, test_sukat_epoll, this, -1);
   EXPECT_NE(-1, ret);
 }

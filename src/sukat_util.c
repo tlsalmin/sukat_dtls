@@ -161,6 +161,11 @@ bool sukat_util_sockopts(int fd, sukat_util_fd_opts_t opts)
   return false;
 }
 
+bool sukat_util_ipv6_enabled(void)
+{
+  return !access("/proc/net/if_inet6", F_OK);
+}
+
 int sukat_util_fd_create(const char *addr, const char *port, int type,
                          sukat_util_fd_opts_t opts, struct sockaddr *saddr,
                          socklen_t *saddr_len)
@@ -169,18 +174,42 @@ int sukat_util_fd_create(const char *addr, const char *port, int type,
   struct sockaddr_storage bind_to = {};
   struct sockaddr_in6 *bind_to_6 = (struct sockaddr_in6 *)&bind_to;
   socklen_t slen = sizeof(bind_to);
+  static int default_family = AF_UNSPEC;
+
+  if (default_family == AF_UNSPEC)
+    {
+      if (sukat_util_ipv6_enabled())
+        {
+          default_family = AF_INET6;
+        }
+      else
+        {
+          INF("IPv6 disabled, defaulting to IPv4");
+          default_family = AF_INET;
+        }
+    }
 
   if (!addr && !port)
     {
       // Default for combined.
-      bind_to.ss_family = AF_INET6;
+      bind_to.ss_family = default_family;
     }
   else if (!addr && port)
     {
       uint16_t port_int = atoi(port);
 
-      bind_to.ss_family = AF_INET6;
-      bind_to_6->sin6_port = htons(port_int);
+      if (default_family == AF_INET6)
+        {
+          bind_to.ss_family = AF_INET6;
+          bind_to_6->sin6_port = htons(port_int);
+        }
+      else
+        {
+          struct sockaddr_in *sin4 = (struct sockaddr_in *)&bind_to;
+
+          sin4->sin_family = AF_INET6;
+          sin4->sin_port = htons(port_int);
+        }
     }
   else if (!sukat_util_solve(addr, port, type, &bind_to, &slen, opts))
     {

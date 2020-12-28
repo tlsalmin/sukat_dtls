@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <sys/types.h>
+#include <sys/queue.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <ctype.h>
@@ -16,7 +17,6 @@
 #include "sukat_log_internal.h"
 #include "sukat_epoll.h"
 #include "sukat_util.h"
-#include "sukat_list.h"
 
 __attribute__((constructor)) static void dtls_nc_ssl_init(void)
 {
@@ -31,9 +31,11 @@ __attribute__((destructor)) static void dtls_nc_ssl_close(void)
 /** @brief Entry for each connected client. */
 struct nc_client_entry
 {
-  sukat_list_link_t link;           //!< Attaches to list.
+  SLIST_ENTRY(nc_client_entry) link;
   sukat_dtls_client_t *client; //!< Client context spawned from server_ctx
 };
+
+SLIST_HEAD(client_list, nc_client_entry) ; //!< List of clients.
 
 /** @brief Main context for DTLS netcat. */
 struct nc_dtls_ctx
@@ -51,9 +53,9 @@ struct nc_dtls_ctx
   };
   socklen_t addr_len;   //!< Length of data in \p address.
   SSL_CTX *ssl_ctx;     //!< SSL_CTX for client or server.
+  struct client_list clients; //!< List of clients.
   char *certificate;    //!< Used certificate as path.
   char *pkey;           //!< Used private key as path.
-  sukat_list_t clients; //!< List of clients.
   int efd;              //!< Epoll for stdin/dtls.
   int signalfd;         //!< FD for signals.
   bool server;          //!< If context is for server or client.
@@ -127,7 +129,7 @@ static void nc_peer_disconnect(struct nc_dtls_ctx *ctx,
 {
   char buf[BUFSIZ];
 
-  sukat_list_remove(&ctx->clients, &client->link);
+  SLIST_REMOVE(&ctx->clients, client, nc_client_entry, link);
   if (client->client)
     {
       INF("Removing peer %s", sukat_dtls_client_to_string(client->client, buf, sizeof(buf)));
@@ -152,7 +154,7 @@ static int nc_client_read(sukat_dtls_client_t *client)
   if (!(ret == -1 &&
         (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)))
     {
-      ERR("Failed to read from client: %s", strerror(errno));
+      ERR("Failed to read from client %p: %s", client, strerror(errno));
       return -1;
     }
   return 0;
@@ -163,7 +165,7 @@ static void nc_dtls_event_cb(void *context, sukat_dtls_client_t *client,
 {
   struct nc_dtls_ctx *ctx = context;
   char ipstr[IPSTRLEN];
-  sukat_list_link_t *iter;
+  struct nc_client_entry *iter;
 
   DBG("Event 0x%x on client %p", event, client);
 
@@ -189,19 +191,18 @@ static void nc_dtls_event_cb(void *context, sukat_dtls_client_t *client,
         /* fall through */
       case sukat_dtls_client_event_disconnected:
           // Need to find client to disconnect.
-          for (iter = sukat_list_begin(&ctx->clients); iter;
-               iter = sukat_list_next(iter))
+          SLIST_FOREACH(iter, &ctx->clients, link)
             {
-              struct nc_client_entry *entry = sukat_list_data(iter, struct nc_client_entry, link);
-
-              if (event == sukat_dtls_client_event_disconnected)
+              if (iter->client == client)
                 {
-                  entry->client = NULL;
+                  if (event == sukat_dtls_client_event_disconnected)
+                    {
+                      iter->client = NULL;
+                    }
+                  nc_peer_disconnect(ctx, iter);
+                  break;
                 }
-              nc_peer_disconnect(ctx, entry);
-              break;
             }
-          assert(iter);
         break;
       default:
         abort();
@@ -215,7 +216,7 @@ static void nc_dtls_event_cb(void *context, sukat_dtls_client_t *client,
       if (client_entry)
         {
           client_entry->client = client;
-          sukat_list_add_to_tail(&ctx->clients, &client_entry->link);
+          SLIST_INSERT_HEAD(&ctx->clients, client_entry, link);
         }
       else
         {
@@ -419,25 +420,21 @@ static int nc_write_to_peers(struct nc_dtls_ctx *ctx, const char *buf,
 
   if (ctx->server)
     {
-      if (!sukat_list_begin(&ctx->clients))
+      if (SLIST_EMPTY(&ctx->clients))
         {
           ERR("Server with data from stdin, but no clients");
         }
       else
         {
-          sukat_list_link_t *iter, *next;
-          ret = 0;
+          struct nc_client_entry *entry;
 
-          for (iter = sukat_list_begin(&ctx->clients); iter; iter = next)
+          SLIST_FOREACH(entry, &ctx->clients, link)
             {
-              struct nc_client_entry *entry =
-                sukat_list_data(iter, struct nc_client_entry, link);
-
-              next = sukat_list_next(iter);
-
               if (nc_write_to_peer(ctx, entry->client, buf, bytes))
                 {
                   nc_peer_disconnect(ctx, entry);
+                  // SLIST_FOREACH_SAFE not ported so break.
+                  break;
                 }
             }
         }
@@ -576,7 +573,8 @@ int main(int argc, char **argv)
     };
 
   // Start off with IPV6 address.
-  ctx.address.ss_family = AF_INET6;
+  ctx.address.ss_family = (sukat_util_ipv6_enabled()) ? AF_INET6 : AF_INET;
+  SLIST_INIT(&ctx.clients);
 
   while ((c = getopt_long(argc, argv, "s:i:c:k:lvhg", long_opts, NULL)) != -1)
     {
@@ -676,8 +674,6 @@ int main(int argc, char **argv)
                   if (ctx.signalfd != -1)
                     {
                       exit_ret = EXIT_SUCCESS;
-                      assert(!ctx.clients.head);
-                      assert(!ctx.clients.tail);
                       while (!sukat_epoll_wait(ctx.efd, nc_epoll_cb, &ctx, -1))
                         {
                           // Main loop'd
@@ -687,16 +683,15 @@ int main(int argc, char **argv)
                   fclose(stdin);
                   if (ctx.server)
                     {
-                      sukat_list_link_t *iter;
-
-                      while ((iter = sukat_list_begin(&ctx.clients)))
+                      while (!SLIST_EMPTY(&ctx.clients))
                         {
-                          struct nc_client_entry *client_entry=
-                            sukat_list_data(iter, struct nc_client_entry, link);
+                          struct nc_client_entry *client_entry =
+                            SLIST_FIRST(&ctx.clients);
+
+                          SLIST_REMOVE_HEAD(&ctx.clients, link);
 
                           sukat_dtls_client_destroy(ctx.server_ctx,
                                                     client_entry->client);
-                          sukat_list_remove(&ctx.clients, &client_entry->link);
                           free(client_entry);
                         }
                       sukat_dtls_server_destroy(ctx.server_ctx);

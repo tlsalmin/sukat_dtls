@@ -194,7 +194,7 @@ static void sukat_dtls_new_client_register(sukat_dtls_server_t *ctx,
 {
   char ipstr[IPSTRLEN];
 
-  INF("Accepted new client from %s",
+  INF("Accepted new client (%p) from %s", client,
       sukat_util_storage_print((struct sockaddr *)&client->peer, ipstr,
                                sizeof(ipstr)));
 
@@ -409,7 +409,7 @@ static int sukat_dtls_client_accept(sukat_dtls_server_t *ctx,
 }
 
 static int sukat_dtls_client_readable(sukat_dtls_server_t *ctx,
-                                  sukat_dtls_client_t *client)
+                                      sukat_dtls_client_t *client)
 {
   int ret = 0;
 
@@ -595,43 +595,41 @@ int sukat_dtls_client_continue(sukat_dtls_client_t *client, uint32_t *events)
   int ret =-1;
   *events = EPOLLIN;
 
-  if (!client->handshake_finished)
-    {
-      ret = SSL_connect(client->ssl);
-      int sslerr;
+  assert(!client->handshake_finished);
+  ret = SSL_connect(client->ssl);
+  int sslerr;
 
-      if (ret != 1)
+  if (ret != 1)
+    {
+      sslerr = SSL_get_error(client->ssl, ret);
+      ERR_clear_error();
+    }
+  if (ret == 1 ||
+      (sslerr == SSL_ERROR_WANT_READ || sslerr == SSL_ERROR_WANT_WRITE))
+    {
+      if (ret == 1)
         {
-          sslerr = SSL_get_error(client->ssl, ret);
-          ERR_clear_error();
-        }
-      if (ret == 1 ||
-          (sslerr == SSL_ERROR_WANT_READ || sslerr == SSL_ERROR_WANT_WRITE))
-        {
-          if (ret == 1)
-            {
-              INF("Client %p handshake finished", client);
-              client->handshake_finished = client->dtls_finished = true;
-            }
-          else
-            {
-              DBG("Client %p connect still needs more %s", client,
-                  (sslerr == SSL_ERROR_WANT_WRITE) ? "write" : "read");
-              ret = 0;
-              if (sslerr == SSL_ERROR_WANT_WRITE)
-                {
-                  *events |= EPOLLOUT;
-                }
-            }
+          INF("Client %p handshake finished", client);
+          client->handshake_finished = client->dtls_finished = true;
         }
       else
         {
-          char errbuf[BUFSIZ];
-
-          ERR("Failed to SSL_connect client %p: %s", client,
-              ERR_error_string(sslerr, errbuf));
-          ret = -1;
+          DBG("Client %p connect still needs more %s", client,
+              (sslerr == SSL_ERROR_WANT_WRITE) ? "write" : "read");
+          ret = 0;
+          if (sslerr == SSL_ERROR_WANT_WRITE)
+            {
+              *events |= EPOLLOUT;
+            }
         }
+    }
+  else
+    {
+      char errbuf[BUFSIZ];
+
+      ERR("Failed to SSL_connect client %p: %s", client,
+          ERR_error_string(sslerr, errbuf));
+      ret = -1;
     }
 
   return ret;

@@ -115,3 +115,11 @@ int sukat_util_peek_peer(int fd, struct sockaddr *saddr, socklen_t slen);
 int sukat_util_fd_duplicate(int bound_fd, int type,
                             struct sockaddr_storage *peer,
                             socklen_t slen, sukat_util_fd_opts_t opts);
+
+/**
+ * @brief Query if IPv6 is enabled.
+ *
+ * @return true Enabled.
+ * @return false Disabled.
+ */
+bool sukat_util_ipv6_enabled(void);

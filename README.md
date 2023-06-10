@@ -123,6 +123,10 @@ tshark data:
 Shows multiple client connecting and getting properly separated. Of course not
 all client connect, as this is UDP, which is lossy.
 
+Update on the lossyness. This probably won't happen on this newest build. The
+issue was with DTLS listen sending verify request to multiple clients in the
+same call. Now that it reads from a mem BIO the same problem shouldn't exists.
+
 ## TODO:
 
 DTLS and MTU: Since we're not using stream-oriented sockets, the

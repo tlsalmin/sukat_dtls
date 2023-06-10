@@ -144,7 +144,7 @@ int sukat_dtls_listen_step(sukat_dtls_client_t *client,
         }
       else
         {
-          INF("Accepting client  %p from %s DTLS handshake needs %d", client,
+          INF("Accepting client %p from %s DTLS handshake needs %d", client,
               sukat_util_storage_print((struct sockaddr *)dtls_peer, errbuf,
                                        sizeof(errbuf)), sslerr);
         }
@@ -213,29 +213,44 @@ static void sukat_dtls_new_client_register(sukat_dtls_server_t *ctx,
  * "accepted" fds */
 static int sukat_dtls_new_client(sukat_dtls_server_t *ctx)
 {
+  static size_t buf_size = BUFSIZ;
+  char buf[buf_size];
   struct sockaddr_storage peer;
-  int peek_ret;
+  int read_ret;
   struct sockaddr_storage bound_store = { };
+  socklen_t slen;
   socklen_t bound_store_len = sizeof(bound_store);
 
   if (getsockname(ctx->udp_fd, (struct sockaddr *)&bound_store,
                   &bound_store_len))
-    {
+  {
       ERR("Failed to get sockname from %d: %s", ctx->udp_fd, strerror(errno));
       return -1;
-    }
-  // Accept new clients in a loop, since that's how we roll.
-  while ((peek_ret = sukat_util_peek_peer(ctx->udp_fd, (struct sockaddr *)&peer,
-                                          sizeof(peer))) > 0)
-    {
+  }
+  while ((slen =sizeof(peer)) && // Just reset it.
+         (read_ret = recvfrom(ctx->udp_fd, buf, sizeof(buf), MSG_TRUNC,
+                              (struct sockaddr *)&peer, &slen)) > 0)
+  {
+    char ipstr[IPSTRLEN];
+
+    if (read_ret > buf_size)
+      {
+        ERR("Truncated message as buffer was %zu and received %d size packet",
+            buf_size, read_ret);
+        // MTU is a limiting factor so this should never occur.
+        continue;
+      }
+
+      DBG("Read %d byte message from %s", read_ret,
+          sukat_util_storage_print((struct sockaddr *)&peer, ipstr,
+                                   sizeof(ipstr)));
       /* The trick with UDP servers is to have the main fd be SO_REUSEADDR |
        * SO_REUSEPORT and any client-connected fds to be only SO_REUSEADDR */
       sukat_util_fd_opts_t opts =
         (sukat_sockopt_reuseaddr | sukat_sockopt_bind);
-      int new_fd;
+      int new_fd =
+        sukat_util_fd_duplicate(ctx->udp_fd, SOCK_DGRAM, &peer, slen, opts);
 
-      new_fd =
-        sukat_util_fd_duplicate(ctx->udp_fd, SOCK_DGRAM, &peer, peek_ret, opts);
       if (new_fd != -1)
         {
           sukat_dtls_client_t *client = calloc(1, sizeof(*client));
@@ -246,26 +261,36 @@ static int sukat_dtls_new_client(sukat_dtls_server_t *ctx)
               char errbuf[512];
 
               client->ssl = SSL_new(ctx->ssl_ctx);
-              memcpy(&client->peer, &peer, peek_ret);
-              client->slen = peek_ret;
+              memcpy(&client->peer, &peer, slen);
+              client->slen = slen;
+
+              DBG("Adding new client %p from %s with ssl %p", client,
+                  sukat_util_storage_print((struct sockaddr *)&peer, errbuf,
+                                           sizeof(errbuf)),
+                  client->ssl);
 
               if (client->ssl)
                 {
                   BIO *bio;
                   SSL_set_options(client->ssl, SSL_OP_COOKIE_EXCHANGE);
 
-                  bio = BIO_new_dgram(ctx->udp_fd, BIO_NOCLOSE);
+                  bio = BIO_new_dgram(new_fd, BIO_NOCLOSE);
                   if (bio)
                     {
+                      BIO *memreadbio = BIO_new_mem_buf(buf, read_ret);
                       uint32_t events = EPOLLIN;
                       int ret;
 
-                      SSL_set_bio(client->ssl, bio, bio);
-
-                      ret = sukat_dtls_listen_step(client, &events);
+                      assert(memreadbio);
+                      BIO_set_mem_eof_return(memreadbio, -1);
                       BIO_set_fd(bio, new_fd, BIO_CLOSE);
                       BIO_ctrl(bio, BIO_CTRL_DGRAM_SET_CONNECTED, 0,
                                &client->peer);
+                      SSL_set_bio(client->ssl, memreadbio, bio);
+
+                      ret = sukat_dtls_listen_step(client, &events);
+
+                      SSL_set_bio(client->ssl, bio, bio);
                       if (ret >= 0)
                         {
                           union epoll_data edata = {.ptr = client};
@@ -312,7 +337,7 @@ static int sukat_dtls_new_client(sukat_dtls_server_t *ctx)
         {
           ERR("Failed to duplicate fd %d: %s", ctx->udp_fd, strerror(errno));
         }
-    }
+  }
 
   return 0;
 }
@@ -614,8 +639,9 @@ int sukat_dtls_client_continue(sukat_dtls_client_t *client, uint32_t *events)
         }
       else
         {
-          DBG("Client %p connect still needs more %s", client,
-              (sslerr == SSL_ERROR_WANT_WRITE) ? "write" : "read");
+          DBG("Client %p connect still needs more %s[%x]", client,
+              (sslerr == SSL_ERROR_WANT_WRITE) ? "write" : "read",
+              sslerr);
           ret = 0;
           if (sslerr == SSL_ERROR_WANT_WRITE)
             {

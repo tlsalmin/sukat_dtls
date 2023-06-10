@@ -27,6 +27,7 @@ void sukat_log_std(sukat_log_lvl_t lvl, __attribute__((unused)) void *context,
   fprintf(stream, "%s: %s:%u: ", component, func, line);
   vfprintf(stream, fmt, ap);
   fprintf(stream, "\n");
+  fflush(stream);
 }
 
 void sukat_log_global_ctx(struct sukat_log_ctx *ctx)

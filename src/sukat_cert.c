@@ -21,8 +21,8 @@ static int sukat_cert_cookie_gen(SSL *ssl, unsigned char *cookie,
 
   if (ex_data_cookie)
     {
-      DBG("Copying %ld byte random cookie to %p", sukat_cert_cookie_len,
-          cookie);
+      DBG("Copying %ld byte random cookie to %p[%lx]", sukat_cert_cookie_len,
+          cookie, ((uint64_t*)ex_data_cookie)[0]);
       memcpy(cookie, ex_data_cookie, sukat_cert_cookie_len);
       *cookie_len = sukat_cert_cookie_len;
 
@@ -41,9 +41,10 @@ static int sukat_cert_cookie_verify(SSL *ssl, const unsigned char *cookie,
 {
   unsigned char *ex_data_cookie = SSL_get_ex_data(ssl, sukat_cert_cookie_index);
 
-  DBG("Verifying cookie %*.s", (int)cookie_len, cookie);
   if (ex_data_cookie)
     {
+      DBG("Verifying cookie [%lx] when expected [%lx] for %p",
+          ((uint64_t *)cookie)[0], ((uint64_t*)ex_data_cookie)[0], ssl);
       if (cookie_len == sukat_cert_cookie_len)
         {
           int ret = memcmp(cookie, ex_data_cookie, cookie_len);
@@ -57,14 +58,10 @@ static int sukat_cert_cookie_verify(SSL *ssl, const unsigned char *cookie,
             {
               unsigned int i;
 
-              ERR("Cookie on client %p didn't match: %d", ssl, ret);
-
-              // Not the prettiest.
-              for (i = 0; i < cookie_len; i++)
-                {
-                  DBG("Byte %u: expected: %hhx, got: %hhx", i,
-                      ex_data_cookie[i], cookie[i]);
-                }
+              ERR("Cookie on client %p[%lx] didn't match[%lx]: %d", ssl,
+                  ((uint64_t *)ex_data_cookie)[0],
+                  ((uint64_t *)cookie)[0],
+                  ret);
             }
         }
       else
@@ -323,8 +320,8 @@ static void sukat_cert_cookie_new(__attribute__((unused)) void *parent,
             {
               if (RAND_bytes(cookie, argl) == 1)
                 {
-                  DBG("Allocated new cookie %p of len %ld to ad %p", cookie,
-                      argl, ad);
+                  DBG("Allocated new cookie %p [%lx] of len %ld to ad %p",
+                      cookie, ((uint64_t *)cookie)[0], argl, ad);
                   return;
                 }
               else
@@ -375,9 +372,11 @@ static int sukat_cert_cookie_dup(CRYPTO_EX_DATA *to, const CRYPTO_EX_DATA *from,
 
               if (CRYPTO_set_ex_data(to, idx, cookie_to) == 1)
                 {
-                  DBG("Copied cookie of length %ld from %p to %p, "
-                      "from ex %p to ex %p", argl, cookie_from, cookie_to,
-                      from, to);
+                  DBG(
+                    "Copied cookie[%lx] of length %ld from %p to %p, "
+                    "from ex %p to ex %p",
+                    ((uint64_t *)cookie_from)[0], argl, cookie_from, cookie_to,
+                    from, to);
                   return 1;
                 }
               else
@@ -417,7 +416,8 @@ static void sukat_cert_cookie_free(__attribute__((unused)) void *parent,
 
       if (cookie)
         {
-          DBG("Freed ex data %p of len %ld from %p", cookie, argl, ad);
+          DBG("Freed ex data %p[%lx] of len %ld from %p", cookie,
+              ((uint64_t *)cookie)[0], argl, ad);
           free(cookie);
           CRYPTO_set_ex_data(ad, idx, NULL);
         }

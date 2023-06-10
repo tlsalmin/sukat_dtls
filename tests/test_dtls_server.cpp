@@ -63,7 +63,7 @@ protected:
 
           if (!timerfd_settime(tfd, 0, &tspec, NULL))
           {
-              union epoll_data edata = {};
+              union epoll_data edata = {.fd = tfd};
 
               if (sukat_epoll_reg(efd, tfd, &edata, EPOLLIN))
               {
@@ -100,7 +100,7 @@ protected:
       int port;
       void *addr;
 
-      client_handshake_finished = false;
+      client_handshake_finished = 0;
       cert_path += "/server_cert.pem";
       pkey_path += "/server_key.pem";
       cert_init_opts.cert = &cert_opts;
@@ -214,6 +214,10 @@ protected:
 
           // Can't assert in static func? K.
           EXPECT_NE(nullptr, client_ctx);
+          if (!client_ctx)
+          {
+              abort();
+          }
           if (!sukat_dtls_client_ready_for_data(client_ctx))
             {
               uint32_t events;
@@ -229,6 +233,9 @@ protected:
                     {
                       .ptr = client_ctx
                     };
+                  std::cout
+                    << "Listening for " << reinterpret_cast<void *>(client_ctx)
+                    << " with events " << std::to_string(events) << std::endl;
 
                   bret =
                     sukat_epoll_reg(test_ctx->efd, fd, &edata, events);
@@ -237,9 +244,14 @@ protected:
                   if (ret == 1)
                     {
                         printf("Client handshake finished\n");
-                      test_ctx->client_handshake_finished = true;
+                      test_ctx->client_handshake_finished++;
                     }
                 }
+              else
+              {
+                ADD_FAILURE() << "Failed to connect on client "
+                              << reinterpret_cast<void *>(client_ctx);
+              }
             }
           else
             {
@@ -260,7 +272,7 @@ protected:
   sukat_dtls_client_event_t events_received;
   socklen_t server_addr_len;
   int efd{-1}, tfd{-1}; //!< Event fd to use.
-  bool client_handshake_finished;
+  unsigned client_handshake_finished;
   std::string last_data, last_data_from_server;
   sukat_dtls_client_t *last_client_connected;
   std::string server_port, server_addr;
@@ -335,7 +347,7 @@ TEST_F(sukatDTLSTest, testClient)
   EXPECT_NE(-1, ret);
 
   // Make a new connection and ensure the client recovers from the first.
-  client_handshake_finished = false;
+  client_handshake_finished = 0;
 
   ret = sukat_dtls_client_connect(client_ssl_ctx, server_addr.c_str(),
                                   server_port.c_str(),
@@ -374,5 +386,58 @@ TEST_F(sukatDTLSTest, testClient)
   SSL_CTX_free(client_ssl_ctx);
 
   ret = sukat_epoll_wait(efd, test_sukat_epoll, this, -1);
+  EXPECT_NE(-1, ret);
+}
+
+TEST_F(sukatDTLSTest, testManyClients)
+{
+
+  int ret;
+  const unsigned n_clients = 20;
+  bool bret;
+  int fd;
+  union epoll_data edata;
+  std::vector<std::pair<SSL_CTX *, sukat_dtls_client_t *>> client_vec;
+  std::string hello("Hello from client"), reply("Hello from server"),
+    received_reply;
+  char buf[BUFSIZ];
+
+  for (unsigned i = 0; i < n_clients; i++)
+    {
+      SSL_CTX *client_ssl_ctx;
+
+      sukat_dtls_client_t *client_ctx = nullptr;
+      uint32_t client_fd_events = 0;
+
+      client_ssl_ctx = SSL_CTX_new(DTLS_client_method());
+      ASSERT_NE(nullptr, client_ssl_ctx);
+
+      std::cout << "Connecting client " << std::to_string(i) << std::endl;
+
+      ret = sukat_dtls_client_connect(client_ssl_ctx, server_addr.c_str(),
+                                      server_port.c_str(), &client_ctx,
+                                      &client_fd_events);
+      EXPECT_NE(-1, ret);
+      ASSERT_NE(nullptr, client_ctx);
+
+      std::cout << "Registering client for epoll handling on client "
+                << reinterpret_cast<void *>(client_ctx) << std::endl;
+
+      client_vec.emplace_back(std::make_pair(client_ssl_ctx, client_ctx));
+
+      fd = sukat_dtls_client_fd(client_ctx);
+      printf("Adding fd %d to epoll %d with events %u\n", fd, efd,
+             client_fd_events);
+      edata.ptr = client_ctx;
+      bret = sukat_epoll_reg(efd, fd, &edata, client_fd_events);
+      EXPECT_TRUE(bret);
+    }
+
+  ret = 0;
+  while (client_handshake_finished < n_clients && ret != -1)
+    {
+      ret = sukat_epoll_wait(efd, test_sukat_epoll, this, -1);
+      std::cout << std::flush;
+    }
   EXPECT_NE(-1, ret);
 }

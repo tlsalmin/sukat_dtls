@@ -294,7 +294,7 @@ int sukat_util_peek_peer(int fd, struct sockaddr *saddr, socklen_t slen)
           sukat_util_storage_print(saddr, ipstr, sizeof(ipstr)));
       return hdr.msg_namelen;
     }
-  else
+  else if (errno != EAGAIN && errno != EWOULDBLOCK)
     {
       ERR("Failed to peek from fd %d: %s", fd,
           (!ret) ? "closed" : strerror(errno));
@@ -325,6 +325,7 @@ int sukat_util_fd_duplicate(int bound_fd, int type,
                 {
                   if (!connect(fd, (struct sockaddr *)peer, slen))
                     {
+                      DBG("Duplicated %d to %d", bound_fd, fd);
                       return fd;
                     }
                   else
